@@ -15,10 +15,11 @@ type Point struct {
 
 // Bounds implement Spatial interface for *Point.
 func (p *Point) Bounds() *rtreego.Rect {
-	if bounds, err := rtreego.NewRect(rtreego.Point{p.Latitude, p.Longitude}, []float64{0, 0}); err == nil {
+	if bounds, err := rtreego.NewRect(rtreego.Point{p.Latitude, p.Longitude}, []float64{1, 1}); err == nil {
 		return bounds
+	} else {
+		panic(err)
 	}
-	return nil
 }
 
 // Equals implement Spatial interface for *Point.

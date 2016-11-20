@@ -1,0 +1,1 @@
+{"Dim":2,"MinChildren":25,"MaxChildren":50,"TreeSize":2,"Height":1,"Root":{"Leaf":true,"Level":1,"Entries":[{"BoundingBox":{"P":[1,2],"Q":[2,3]},"Obj":{"Latitude":1,"Longitude":2,"Name":"mo"}},{"BoundingBox":{"P":[14,88],"Q":[15,89]},"Obj":{"Latitude":14,"Longitude":88,"Name":"Kyiv"}}]}}

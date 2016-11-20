@@ -5,19 +5,16 @@ import (
 	"io"
 
 	"encoding/json"
-
-	"github.com/dhconnelly/rtreego"
 )
 
 // Deserialize builds tree from a given reader.
-func Deserialize(reader *bufio.Reader) (*rtreego.Rtree, error) {
+func (t *RTree) Deserialize(reader *bufio.Reader) error {
 	bs, _, err := reader.ReadLine()
 	if err != nil {
-		return nil, err
+		return err
 	}
-	rt := &rtreego.Rtree{}
-	err = json.Unmarshal(bs, rt)
-	return rt, err
+	err = json.Unmarshal(bs, &t)
+	return err
 }
 
 // Serialize stores tree in a given reader.

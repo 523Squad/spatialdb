@@ -7,12 +7,17 @@ import (
 	"github.com/reiver/go-oi"
 	"github.com/reiver/go-telnet"
 
+	"bufio"
 	"bytes"
 	"fmt"
+	"os"
 	"spatialdb/index"
 	"spatialdb/model"
 	"strconv"
+	"time"
 )
+
+const filename = "spatial.db"
 
 var skipRunes map[rune]bool
 
@@ -78,6 +83,34 @@ func (h *ConnectionHandler) processCommand(command string) string {
 		} else {
 			return fmt.Sprintf("%v", err)
 		}
+	case "save":
+		var file *os.File
+		var err error
+		if file, err = os.OpenFile(filename, os.O_RDWR|os.O_APPEND, 0660); err == nil {
+			err = h.state.tree.Serialize(file)
+		}
+		if err != nil {
+			err = file.Sync()
+		}
+		if err == nil {
+			return "Successfully saved"
+		}
+		return fmt.Sprintf("%v", err)
+	case "load":
+		var file *os.File
+		var err error
+		if file, err = os.OpenFile(filename, os.O_RDONLY, 0660); err == nil {
+			err = h.state.tree.Deserialize(bufio.NewReader(file))
+		}
+		if err == nil {
+			return "Successfully loaded"
+		}
+		return fmt.Sprintf("%v", err)
+	case "hang":
+		for i := 0; i < 5; i++ {
+			time.Sleep(time.Second)
+		}
+		return "Hung!"
 	}
 	return fmt.Sprintf("Unrecognized command: %s", command)
 }
