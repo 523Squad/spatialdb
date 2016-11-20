@@ -7,7 +7,7 @@ import (
 )
 
 // PORT is open to TELNET connection.
-const PORT = "3456"
+const PORT = ":3456"
 
 func main() {
 	handler := &client.ConnectionHandler{}
