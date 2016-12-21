@@ -10,7 +10,7 @@ import (
 const PORT = ":3456"
 
 func main() {
-	handler := &client.ConnectionHandler{}
+	handler := client.NewHandler()
 
 	err := telnet.ListenAndServe(PORT, handler)
 	if nil != err {

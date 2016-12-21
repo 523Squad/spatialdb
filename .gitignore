@@ -32,3 +32,6 @@ vendor/
 # vscode
 .vscode/
 **/.vscode/
+
+# db files
+*.db

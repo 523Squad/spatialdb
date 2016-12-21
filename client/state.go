@@ -1,9 +1,9 @@
 package client
 
 import (
-	"spatialdb/index"
+	"github.com/dhconnelly/rtreego"
 )
 
 type state struct {
-	tree *index.RTree
+	tree *rtreego.Rtree
 }

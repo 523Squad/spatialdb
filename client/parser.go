@@ -4,17 +4,15 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/dhconnelly/rtreego"
 	"github.com/reiver/go-oi"
 	"github.com/reiver/go-telnet"
 
-	"bufio"
-	"bytes"
 	"fmt"
-	"os"
-	"spatialdb/index"
 	"spatialdb/model"
 	"strconv"
 	"time"
+	"encoding/json"
 )
 
 const filename = "spatial.db"
@@ -23,7 +21,15 @@ var skipRunes map[rune]bool
 
 // ConnectionHandler is TELNET connection handler which parses db commands.
 type ConnectionHandler struct {
+	fileIO *FileIO
+}
+
+type connection struct {
 	state *state
+}
+
+func NewHandler() *ConnectionHandler {
+	return &ConnectionHandler{fileIO: newReader()}
 }
 
 // ServeTELNET implements Handler interface for ConnectionHandler.
@@ -32,10 +38,8 @@ func (h *ConnectionHandler) ServeTELNET(ctx telnet.Context, w telnet.Writer, r t
 
 	var buffer [1]byte
 	p := buffer[:]
-	if h.state == nil {
-		h.state = &state{tree: index.NewTree()}
-	}
 
+	conn := &connection{state: &state{tree: rtreego.NewTree(2, 3, 3)}}
 	// Append buffer to a command until ';' met.
 	command := []rune{}
 	for {
@@ -50,7 +54,7 @@ func (h *ConnectionHandler) ServeTELNET(ctx telnet.Context, w telnet.Writer, r t
 			}
 		}
 		if delim, _ := utf8.DecodeRuneInString(";"); delim == r {
-			oi.LongWriteString(w, h.processCommand(string(command))+"\n")
+			oi.LongWriteString(w, h.processCommand(conn, string(command))+"\n")
 			command = []rune{}
 		}
 		if nil != err || r == utf8.RuneError {
@@ -60,57 +64,50 @@ func (h *ConnectionHandler) ServeTELNET(ctx telnet.Context, w telnet.Writer, r t
 	}
 }
 
-func (h *ConnectionHandler) processCommand(command string) string {
+func (h *ConnectionHandler) processCommand(c *connection, command string) string {
 	parts := strings.Split(command, " ")
+	var err error
+	var res string
 	switch parts[0] {
 	case "add":
 		p := &model.Point{Name: parts[1]}
 		var err error
-		p.Latitude, err = strconv.ParseFloat(parts[2], 64)
+		lat, err := strconv.ParseFloat(parts[2], 64)
 		if err != nil {
-			return fmt.Sprintf("%v", err)
+			break
 		}
-		p.Longitude, err = strconv.ParseFloat(parts[3], 64)
+		lng, err := strconv.ParseFloat(parts[3], 64)
 		if err != nil {
-			return fmt.Sprintf("%v", err)
+			break
 		}
-		h.state.tree.Insert(p)
-		return fmt.Sprintf("Inserted %+v", p)
+		p.Location = &rtreego.SPoint{Latitude: lat, Longitude: lng}
+		c.state.tree.Insert(p.Location)
+		res = fmt.Sprintf("Inserted %+v", p.Location)
 	case "print":
-		buf := bytes.NewBuffer([]byte{})
-		if err := h.state.tree.Serialize(buf); err == nil {
-			return string(buf.Bytes())
-		} else {
-			return fmt.Sprintf("%v", err)
+		js, err := json.Marshal(c.state.tree)
+		if err == nil {
+			res = string(js)
 		}
 	case "save":
-		var file *os.File
-		var err error
-		if file, err = os.OpenFile(filename, os.O_RDWR|os.O_APPEND, 0660); err == nil {
-			err = h.state.tree.Serialize(file)
-		}
-		if err != nil {
-			err = file.Sync()
-		}
+		err = h.fileIO.saveTree(c.state.tree)
 		if err == nil {
-			return "Successfully saved"
+			res = "Successfully saved"
 		}
-		return fmt.Sprintf("%v", err)
 	case "load":
-		var file *os.File
-		var err error
-		if file, err = os.OpenFile(filename, os.O_RDONLY, 0660); err == nil {
-			err = h.state.tree.Deserialize(bufio.NewReader(file))
-		}
+		c.state.tree, err = h.fileIO.loadTree()
 		if err == nil {
-			return "Successfully loaded"
+			res = "Successfully loaded"
 		}
-		return fmt.Sprintf("%v", err)
 	case "hang":
 		for i := 0; i < 5; i++ {
 			time.Sleep(time.Second)
 		}
-		return "Hung!"
+		res = "Hung!"
+	default:
+		res = fmt.Sprintf("Unrecognized command: %s", command)
 	}
-	return fmt.Sprintf("Unrecognized command: %s", command)
+	if err == nil {
+		return res
+	}
+	return fmt.Sprintf("%v", err)
 }
