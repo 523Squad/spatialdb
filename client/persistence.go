@@ -67,6 +67,20 @@ func (f *FileIO) saveTree(tree *rtreego.Rtree) error {
 	return err
 }
 
+func (f *FileIO) recordsLen() (int64, error) {
+	var file *os.File
+	var err error
+	f.flock.Lock()
+	defer f.flock.Unlock()
+
+	if file, err = os.OpenFile(recordFilename, os.O_RDWR|os.O_APPEND, 0660); err == nil {
+		if stat, err := file.Stat(); err == nil {
+			return stat.Size(), nil
+		}
+	}
+	return -1, err
+}
+
 func (f *FileIO) createRecord(point *model.Point) (int64, error) {
 	var file *os.File
 	var err error
@@ -90,6 +104,38 @@ func (f *FileIO) createRecord(point *model.Point) (int64, error) {
 	return newSize, err
 }
 
-func (f *FileIO) loadRecord(offset int64) (*model.Point, error) {
-	return nil, nil
+func (f *FileIO) readRecords(offsets []int64) ([]*model.Point, error) {
+	var file *os.File
+	var err error
+	f.flock.Lock()
+	defer f.flock.Unlock()
+
+	var reader *bufio.Reader
+	if file, err = os.OpenFile(recordFilename, os.O_RDONLY, 0660); err == nil {
+		reader = bufio.NewReader(file)
+	} else {
+		return nil, err
+	}
+
+	points := []*model.Point{}
+	bytePointer := int64(0)
+	for _, offset := range offsets {
+		if _, err := reader.Discard(int(offset - bytePointer)); err == nil {
+			// TODO: Handle isPrefix case. Probably with `ReadString('\n')`
+			if line, _, err := reader.ReadLine(); err == nil {
+				var p *model.Point
+				if err = json.Unmarshal(line, &p); err == nil {
+					bytePointer = offset + int64(len(line)+1)
+					points = append(points, p)
+				}
+			}
+		}
+		if err != nil {
+			break
+		}
+	}
+	if err == nil {
+		return points, nil
+	}
+	return nil, err
 }
