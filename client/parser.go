@@ -41,6 +41,7 @@ func (h *ConnectionHandler) ServeTELNET(ctx telnet.Context, w telnet.Writer, r t
 	p := buffer[:]
 
 	conn := &connection{state: &state{tree: rtreego.NewTree(2, 3, 3)}}
+	oi.LongWriteString(w, h.processCommand(conn, "load")+"\n")
 	// Append buffer to a command until ';' met.
 	command := []rune{}
 	for {
@@ -76,7 +77,7 @@ func (h *ConnectionHandler) processCommand(c *connection, command string) string
 	var res string
 	switch parts[0] {
 	case "add":
-		p := &model.Point{Name: parts[1]}
+		p := &model.Point{ID: c.state.lastID + 1, Name: parts[1]}
 		var err error
 		lat, err := strconv.ParseFloat(parts[2], 64)
 		if err != nil {
@@ -91,6 +92,7 @@ func (h *ConnectionHandler) processCommand(c *connection, command string) string
 		if err != nil {
 			break
 		}
+		c.state.lastID = c.state.lastID + 1
 		c.state.fileLen = newSize
 		c.state.tree.Insert(p.Location)
 		res = fmt.Sprintf("Inserted %+v, new file size: %v", p.Location, c.state.fileLen)
@@ -139,17 +141,26 @@ func (h *ConnectionHandler) processCommand(c *connection, command string) string
 		}
 	case "save":
 		err = h.fileIO.saveTree(c.state.tree)
-		if err == nil {
-			res = "Successfully saved"
-		}
-	case "load":
-		c.state.tree, err = h.fileIO.loadTree()
 		if err != nil {
 			break
 		}
-		c.state.fileLen, err = h.fileIO.recordsLen()
+		res = "Successfully saved index tree\n"
+		err = h.fileIO.saveMeta(c.state)
 		if err == nil {
-			res = "Successfully loaded"
+			res = res + "Successfully saved metadata"
+		}
+	case "load":
+		c.state.tree, err = h.fileIO.loadTree()
+		if c.state.tree == nil {
+			c.state.tree = rtreego.NewTree(2, 3, 3)
+		}
+		if err != nil {
+			break
+		}
+		res = "Successfully loaded index tree\n"
+		err = h.fileIO.loadMeta(c.state)
+		if err == nil {
+			res = res + "Successfully loaded metadata"
 		}
 	case "hang":
 		for i := 0; i < 5; i++ {

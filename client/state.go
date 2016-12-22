@@ -7,4 +7,5 @@ import (
 type state struct {
 	tree    *rtreego.Rtree
 	fileLen int64
+	lastID  int64
 }

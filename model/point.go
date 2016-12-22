@@ -4,6 +4,7 @@ import "github.com/dhconnelly/rtreego"
 
 // Point represents geographical point on the globe.
 type Point struct {
+	ID       int64
 	Location *rtreego.SPoint
 	Name     string
 }

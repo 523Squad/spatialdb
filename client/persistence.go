@@ -9,8 +9,12 @@ import (
 	"github.com/dhconnelly/rtreego"
 
 	"spatialdb/model"
+	"strconv"
+	"strings"
+	"fmt"
 )
 
+const metaFilename = "meta.db"
 const indexFilename = "index.db"
 const recordFilename = "records.db"
 
@@ -55,7 +59,7 @@ func (f *FileIO) saveTree(tree *rtreego.Rtree) error {
 	f.flock.Lock()
 	defer f.flock.Unlock()
 	// TODO: Update tree, not rewrite.
-	if file, err = os.OpenFile(indexFilename, os.O_RDWR /*|os.O_APPEND*/, 0660); err == nil {
+	if file, err = os.OpenFile(indexFilename, os.O_RDWR, 0660); err == nil {
 		if js, err := json.Marshal(tree); err == nil {
 			_, err = file.WriteString(string(js) + "\n")
 		}
@@ -67,18 +71,38 @@ func (f *FileIO) saveTree(tree *rtreego.Rtree) error {
 	return err
 }
 
-func (f *FileIO) recordsLen() (int64, error) {
+func (f *FileIO) loadMeta(s *state) error {
 	var file *os.File
 	var err error
 	f.flock.Lock()
 	defer f.flock.Unlock()
 
-	if file, err = os.OpenFile(recordFilename, os.O_RDWR|os.O_APPEND, 0660); err == nil {
-		if stat, err := file.Stat(); err == nil {
-			return stat.Size(), nil
+	var reader *bufio.Reader
+	if file, err = os.OpenFile(metaFilename, os.O_RDONLY, 0660); err == nil {
+		reader = bufio.NewReader(file)
+		if line, _, err := reader.ReadLine(); err == nil {
+			parts := strings.Split(string(line), " ")
+			s.fileLen, err = strconv.ParseInt(parts[0], 10, 64)
+			if err == nil {
+				s.lastID, err = strconv.ParseInt(parts[1], 10, 64)
+			}
 		}
 	}
-	return -1, err
+	return err
+}
+
+func (f *FileIO) saveMeta(s *state) error {
+	var file *os.File
+	var err error
+	f.flock.Lock()
+	defer f.flock.Unlock()
+	if file, err = os.OpenFile(metaFilename, os.O_RDWR, 0660); err == nil {
+		_, err = file.WriteString(fmt.Sprintf("%d %d \n", s.fileLen, s.lastID))
+	}
+	if err == nil {
+		err = file.Sync()
+	}
+	return err
 }
 
 func (f *FileIO) createRecord(point *model.Point) (int64, error) {
