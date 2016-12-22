@@ -5,5 +5,6 @@ import (
 )
 
 type state struct {
-	tree *rtreego.Rtree
+	tree    *rtreego.Rtree
+	fileLen int64
 }

@@ -80,9 +80,14 @@ func (h *ConnectionHandler) processCommand(c *connection, command string) string
 		if err != nil {
 			break
 		}
-		p.Location = &rtreego.SPoint{Latitude: lat, Longitude: lng}
+		p.Location = &rtreego.SPoint{Latitude: lat, Longitude: lng, Offset: c.state.fileLen}
+		newSize, err := h.fileIO.createRecord(p)
+		if err != nil {
+			break
+		}
+		c.state.fileLen = newSize
 		c.state.tree.Insert(p.Location)
-		res = fmt.Sprintf("Inserted %+v", p.Location)
+		res = fmt.Sprintf("Inserted %+v, new file size: %v", p.Location, c.state.fileLen)
 	case "print":
 		js, err := json.Marshal(c.state.tree)
 		if err == nil {

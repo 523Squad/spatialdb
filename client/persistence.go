@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"os"
 	"sync"
-	"time"
 
 	"github.com/dhconnelly/rtreego"
 
@@ -13,6 +12,7 @@ import (
 )
 
 const indexFilename = "index.db"
+const recordFilename = "records.db"
 
 // FileIO implements convenient operations for db file IO
 type FileIO struct {
@@ -38,7 +38,7 @@ func (f *FileIO) loadTree() (*rtreego.Rtree, error) {
 	}
 
 	var tree *rtreego.Rtree
-	// TODO: Handle isPrefix case
+	// TODO: Handle isPrefix case. Probably with `ReadString('\n')`
 	if line, _, err := reader.ReadLine(); err == nil {
 		err = json.Unmarshal(line, &tree)
 	}
@@ -54,7 +54,6 @@ func (f *FileIO) saveTree(tree *rtreego.Rtree) error {
 	var err error
 	f.flock.Lock()
 	defer f.flock.Unlock()
-	time.Sleep(10 * time.Second)
 	// TODO: Update tree, not rewrite.
 	if file, err = os.OpenFile(indexFilename, os.O_RDWR /*|os.O_APPEND*/, 0660); err == nil {
 		if js, err := json.Marshal(tree); err == nil {
@@ -66,6 +65,29 @@ func (f *FileIO) saveTree(tree *rtreego.Rtree) error {
 		err = file.Sync()
 	}
 	return err
+}
+
+func (f *FileIO) createRecord(point *model.Point) (int64, error) {
+	var file *os.File
+	var err error
+	f.flock.Lock()
+	defer f.flock.Unlock()
+
+	newSize := int64(-1)
+	if file, err = os.OpenFile(recordFilename, os.O_RDWR|os.O_APPEND, 0660); err == nil {
+		if js, err := json.Marshal(point); err == nil {
+			_, err = file.WriteString(string(js) + "\n")
+		}
+	}
+	if err == nil {
+		err = file.Sync()
+	}
+	if err == nil {
+		if stat, err := file.Stat(); err == nil {
+			newSize = stat.Size()
+		}
+	}
+	return newSize, err
 }
 
 func (f *FileIO) loadRecord(offset int64) (*model.Point, error) {
