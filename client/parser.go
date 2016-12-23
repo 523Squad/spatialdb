@@ -26,6 +26,7 @@ type ConnectionHandler struct {
 }
 
 type connection struct {
+	// TODO: Synchronize access to this please.
 	state *state
 }
 
@@ -87,7 +88,7 @@ func (h *ConnectionHandler) processCommand(c *connection, command string) string
 			break
 		}
 		p.Location = &rtreego.SPoint{Latitude: lat, Longitude: lng, Offset: c.state.fileLen}
-		newSize, err := h.fileIO.createRecord(p)
+		newSize, err := h.fileIO.createRecordDefault(p)
 		if err != nil {
 			break
 		}
@@ -131,6 +132,23 @@ func (h *ConnectionHandler) processCommand(c *connection, command string) string
 			for _, r := range records {
 				res = res + fmt.Sprintf("\t%+v\n", *r)
 			}
+		}
+	case "update":
+		// Currently use offset, but TODO: add simple binary tree index for model.Point.ID
+		offset, err := strconv.ParseInt(parts[1], 10, 64)
+		if err != nil {
+			break
+		}
+
+		args := map[string]string{}
+		// Assume operation is `set``
+		for i := 2; i < len(parts)-1; i += 2 {
+			args[parts[i]] = parts[i+1]
+		}
+
+		p, err := h.fileIO.updateRecord(offset, args, c.state)
+		if err == nil {
+			res = fmt.Sprintf("Successfully updated %+v at offset %d", p, offset)
 		}
 	case "delete":
 		offset, err := strconv.ParseInt(parts[1], 10, 64)

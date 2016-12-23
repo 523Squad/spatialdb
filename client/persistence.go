@@ -23,20 +23,19 @@ const recordFilename = "records.db"
 
 // FileIO implements convenient operations for db file IO
 type FileIO struct {
-	metaLock    *sync.RWMutex
-	indexLock   *sync.RWMutex
-	recordsLock *sync.RWMutex
+	fileMx       *sync.RWMutex
+	priorWriteMx *sync.Mutex
 }
 
 func newReader() *FileIO {
-	return &FileIO{metaLock: &sync.RWMutex{}, indexLock: &sync.RWMutex{}, recordsLock: &sync.RWMutex{}}
+	return &FileIO{fileMx: &sync.RWMutex{}, priorWriteMx: &sync.Mutex{}}
 }
 
 func (f *FileIO) loadTree() (*rtreego.Rtree, error) {
 	var file *os.File
 	// TODO: Separate reading and deserialization to reduce blocking
-	f.indexLock.RLock()
-	defer f.indexLock.RUnlock()
+	f.fileMx.RLock()
+	defer f.fileMx.RUnlock()
 
 	var err error
 	var scanner *bufio.Scanner
@@ -61,8 +60,10 @@ func (f *FileIO) saveTree(tree *rtreego.Rtree, indexFilename string, blocking bo
 	var file *os.File
 	var err error
 	if blocking {
-		f.indexLock.Lock()
-		defer f.indexLock.Unlock()
+		f.priorWriteMx.Lock()
+		f.fileMx.Lock()
+		f.priorWriteMx.Unlock()
+		defer f.fileMx.Unlock()
 	}
 	// TODO: Update tree, not rewrite.
 	if file, err = os.OpenFile(indexFilename, os.O_RDWR|os.O_CREATE, 0660); err == nil {
@@ -84,8 +85,8 @@ func (f *FileIO) saveTreeDefault(tree *rtreego.Rtree) error {
 func (f *FileIO) loadMeta(s *state) error {
 	var file *os.File
 	var err error
-	f.metaLock.RLock()
-	defer f.metaLock.RUnlock()
+	f.fileMx.RLock()
+	defer f.fileMx.RUnlock()
 
 	var scanner *bufio.Scanner
 	if file, err = os.OpenFile(metaFilename, os.O_RDONLY, 0660); err == nil {
@@ -106,8 +107,10 @@ func (f *FileIO) saveMeta(s *state, filename string, blocking bool) error {
 	var err error
 	// TODO: Come up with more elegant workaround
 	if blocking {
-		f.metaLock.Lock()
-		defer f.metaLock.Unlock()
+		f.priorWriteMx.Lock()
+		f.fileMx.Lock()
+		f.priorWriteMx.Unlock()
+		defer f.fileMx.Unlock()
 	}
 	if file, err = os.OpenFile(filename, os.O_RDWR|os.O_CREATE, 0660); err == nil {
 		_, err = file.WriteString(fmt.Sprintf("%d %d \n", s.fileLen, s.lastID))
@@ -123,11 +126,16 @@ func (f *FileIO) saveMetaDefault(s *state) error {
 	return f.saveMeta(s, metaFilename, true)
 }
 
-func (f *FileIO) createRecord(point *model.Point) (int64, error) {
+func (f *FileIO) createRecord(point *model.Point, recordFilename string, blocking bool) (int64, error) {
 	var file *os.File
 	var err error
-	f.recordsLock.Lock()
-	defer f.recordsLock.Unlock()
+
+	if blocking {
+		f.priorWriteMx.Lock()
+		f.fileMx.Lock()
+		f.priorWriteMx.Unlock()
+		defer f.fileMx.Unlock()
+	}
 
 	newSize := int64(-1)
 	if file, err = os.OpenFile(recordFilename, os.O_RDWR|os.O_APPEND, 0660); err == nil {
@@ -146,11 +154,15 @@ func (f *FileIO) createRecord(point *model.Point) (int64, error) {
 	return newSize, err
 }
 
+func (f *FileIO) createRecordDefault(point *model.Point) (int64, error) {
+	return f.createRecord(point, recordFilename, true)
+}
+
 func (f *FileIO) readRecords(offsets []int64) ([]*model.Point, error) {
 	var file *os.File
 	var err error
-	f.recordsLock.RLock()
-	defer f.recordsLock.RUnlock()
+	f.fileMx.RLock()
+	defer f.fileMx.RUnlock()
 
 	var reader *bufio.Reader
 	if file, err = os.OpenFile(recordFilename, os.O_RDONLY, 0660); err == nil {
@@ -162,14 +174,14 @@ func (f *FileIO) readRecords(offsets []int64) ([]*model.Point, error) {
 	points := []*model.Point{}
 	bytePointer := int64(0)
 	for _, offset := range offsets {
-		log.Printf("Reading offset %d, dicarding %d...\n", offset, offset-bytePointer)
+		log.Printf("Reading offset %d, discarding %d...\n", offset, offset-bytePointer)
 		if _, err := reader.Discard(int(offset - bytePointer)); err == nil {
 			p, bytesRead, err := f.readRecord(reader)
 			if err != nil {
 				break
 			}
 			points = append(points, p)
-			bytePointer += int64(bytesRead)
+			bytePointer = offset + int64(bytesRead)
 		} else {
 			break
 		}
@@ -194,6 +206,96 @@ func (f *FileIO) readRecord(reader *bufio.Reader) (*model.Point, int, error) {
 	return nil, 0, err
 }
 
+// TODO: Refactor to unify with deleteRecord()
+func (f *FileIO) updateRecord(offset int64, args map[string]string, s *state) (*model.Point, error) {
+	fileSuffix := "-" + strconv.FormatInt(rand.Int63(), 16)
+	stateCopy := &state{}
+	recordCopyFilename := "records" + fileSuffix + ".db"
+	log.Printf("Copying records to %s...\n", recordCopyFilename)
+
+	// Acquire priority write mutex to prevent other threads from writing data.
+	f.priorWriteMx.Lock()
+	defer f.priorWriteMx.Unlock()
+
+	f.fileMx.RLock()
+
+	deletedBytes, err := f.copyRecordsWithout(recordCopyFilename, offset, stateCopy)
+	if err != nil {
+		return nil, err
+	}
+	var updated *model.Point
+	err = json.Unmarshal(deletedBytes, &updated)
+	if err != nil {
+		return nil, err
+	}
+	log.Printf("Copied records successfully, point to update: %+v", updated)
+
+	for key, value := range args {
+		switch strings.ToLower(key) {
+		case "name":
+			updated.Name = value
+		case "lat":
+			lat, err := strconv.ParseFloat(value, 64)
+			if err != nil {
+				break
+			}
+			updated.Location.Latitude = lat
+		case "lng":
+			lng, err := strconv.ParseFloat(value, 64)
+			if err != nil {
+				break
+			}
+			updated.Location.Longitude = lng
+		}
+	}
+
+	updated.Location.Offset = stateCopy.fileLen
+	log.Printf("Parsed arguments, point to update: %+v", updated)
+	newSize, err := f.createRecord(updated, recordCopyFilename, false)
+	if err != nil {
+		return nil, err
+	}
+	stateCopy.fileLen = newSize
+
+	indexCopyFilename := "index" + fileSuffix + ".db"
+	err = f.indexCopy(recordCopyFilename, indexCopyFilename, stateCopy)
+	if err != nil {
+		return nil, err
+	}
+
+	metaCopyFilename := "meta" + fileSuffix + ".db"
+	err = f.saveMeta(stateCopy, metaCopyFilename, false)
+	if err != nil {
+		return nil, err
+	}
+
+	// Release read-lock
+	f.fileMx.RUnlock()
+	// This should be done in priority because of priority write mutex.
+	f.fileMx.Lock()
+	defer f.fileMx.Unlock()
+
+	err = os.Rename(recordCopyFilename, recordFilename)
+	if err != nil {
+		return nil, err
+	}
+	log.Printf("Copied %s to %s\n", recordCopyFilename, recordFilename)
+	err = os.Rename(indexCopyFilename, indexFilename)
+	if err != nil {
+		return nil, err
+	}
+	log.Printf("Copied %s to %s\n", indexCopyFilename, indexFilename)
+	// Lock state update too
+	err = os.Rename(metaCopyFilename, metaFilename)
+	if err != nil {
+		return nil, err
+	}
+	log.Printf("Copied %s to %s\n", metaCopyFilename, metaFilename)
+	*s = *stateCopy
+	log.Printf("New state: %+v", s)
+	return updated, nil
+}
+
 // Creates copy of records.db without given record, rebuilds index and metadata
 // of copy and then replaces original files with new ones new files
 func (f *FileIO) deleteRecord(offset int64, s *state) (*model.Point, error) {
@@ -201,6 +303,13 @@ func (f *FileIO) deleteRecord(offset int64, s *state) (*model.Point, error) {
 	stateCopy := &state{}
 	recordCopyFilename := "records" + fileSuffix + ".db"
 	log.Printf("Copying records to %s...\n", recordCopyFilename)
+
+	// Acquire priority write mutex to prevent other threads from writing data.
+	f.priorWriteMx.Lock()
+	defer f.priorWriteMx.Unlock()
+
+	f.fileMx.RLock()
+
 	deletedBytes, err := f.copyRecordsWithout(recordCopyFilename, offset, stateCopy)
 	if err != nil {
 		return nil, err
@@ -224,31 +333,29 @@ func (f *FileIO) deleteRecord(offset int64, s *state) (*model.Point, error) {
 		return nil, err
 	}
 
-	f.recordsLock.Lock()
+	// Release read-lock
+	f.fileMx.RUnlock()
+	// This should be done in priority because of priority write mutex.
+	f.fileMx.Lock()
+	defer f.fileMx.Unlock()
+
 	err = os.Rename(recordCopyFilename, recordFilename)
-	f.recordsLock.Unlock()
 	if err != nil {
 		return nil, err
 	}
 	log.Printf("Copied %s to %s\n", recordCopyFilename, recordFilename)
-	f.indexLock.Lock()
 	err = os.Rename(indexCopyFilename, indexFilename)
-	f.indexLock.Unlock()
 	if err != nil {
 		return nil, err
 	}
 	log.Printf("Copied %s to %s\n", indexCopyFilename, indexFilename)
-	f.metaLock.Lock()
 	// Lock state update too
 	err = os.Rename(metaCopyFilename, metaFilename)
-	f.metaLock.Unlock()
 	if err != nil {
 		return nil, err
 	}
 	log.Printf("Copied %s to %s\n", metaCopyFilename, metaFilename)
-	f.metaLock.Lock()
 	*s = *stateCopy
-	f.metaLock.Unlock()
 	log.Printf("New state: %+v", s)
 	return deleted, err
 }
@@ -256,9 +363,6 @@ func (f *FileIO) deleteRecord(offset int64, s *state) (*model.Point, error) {
 func (f *FileIO) copyRecordsWithout(destFilename string, offset int64, s *state) ([]byte, error) {
 	var originFile, destFile *os.File
 	var err error
-
-	f.recordsLock.RLock()
-	defer f.recordsLock.RUnlock()
 
 	var scanner *bufio.Scanner
 	if originFile, err = os.OpenFile(recordFilename, os.O_RDONLY, 0660); err == nil {
@@ -333,8 +437,6 @@ func (f *FileIO) indexCopy(recordFilename, indexFilename string, s *state) error
 func (f *FileIO) buildIndexCopy(filename string, s *state) error {
 	var file *os.File
 	var err error
-	f.recordsLock.RLock()
-	defer f.recordsLock.RUnlock()
 
 	var reader *bufio.Reader
 	if file, err = os.OpenFile(filename, os.O_RDONLY, 0660); err == nil {
