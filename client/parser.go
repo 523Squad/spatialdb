@@ -78,7 +78,6 @@ func (h *ConnectionHandler) processCommand(c *connection, command string) string
 	switch parts[0] {
 	case "add":
 		p := &model.Point{ID: c.state.lastID + 1, Name: parts[1]}
-		var err error
 		lat, err := strconv.ParseFloat(parts[2], 64)
 		if err != nil {
 			break
@@ -97,7 +96,6 @@ func (h *ConnectionHandler) processCommand(c *connection, command string) string
 		c.state.tree.Insert(p.Location)
 		res = fmt.Sprintf("Inserted %+v, new file size: %v", p.Location, c.state.fileLen)
 	case "intersect":
-		var err error
 		lat, err := strconv.ParseFloat(parts[1], 64)
 		if err != nil {
 			break
@@ -134,18 +132,27 @@ func (h *ConnectionHandler) processCommand(c *connection, command string) string
 				res = res + fmt.Sprintf("\t%+v\n", *r)
 			}
 		}
+	case "delete":
+		offset, err := strconv.ParseInt(parts[1], 10, 64)
+		if err != nil {
+			break
+		}
+		p, err := h.fileIO.deleteRecord(offset, c.state)
+		if err == nil {
+			res = fmt.Sprintf("Successfully deleted %+v at offset %d", p, offset)
+		}
 	case "print":
 		js, err := json.Marshal(c.state.tree)
 		if err == nil {
 			res = string(js)
 		}
 	case "save":
-		err = h.fileIO.saveTree(c.state.tree)
+		err = h.fileIO.saveTreeDefault(c.state.tree)
 		if err != nil {
 			break
 		}
 		res = "Successfully saved index tree\n"
-		err = h.fileIO.saveMeta(c.state)
+		err = h.fileIO.saveMetaDefault(c.state)
 		if err == nil {
 			res = res + "Successfully saved metadata"
 		}
@@ -153,6 +160,7 @@ func (h *ConnectionHandler) processCommand(c *connection, command string) string
 		c.state.tree, err = h.fileIO.loadTree()
 		if c.state.tree == nil {
 			c.state.tree = rtreego.NewTree(2, 3, 3)
+			err = nil
 		}
 		if err != nil {
 			break

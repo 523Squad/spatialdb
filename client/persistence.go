@@ -3,15 +3,18 @@ package client
 import (
 	"bufio"
 	"encoding/json"
+	"io"
+	"log"
 	"os"
 	"sync"
 
 	"github.com/dhconnelly/rtreego"
 
+	"fmt"
+	"math/rand"
 	"spatialdb/model"
 	"strconv"
 	"strings"
-	"fmt"
 )
 
 const metaFilename = "meta.db"
@@ -20,31 +23,32 @@ const recordFilename = "records.db"
 
 // FileIO implements convenient operations for db file IO
 type FileIO struct {
-	flock *sync.RWMutex
+	metaLock    *sync.RWMutex
+	indexLock   *sync.RWMutex
+	recordsLock *sync.RWMutex
 }
 
 func newReader() *FileIO {
-	return &FileIO{flock: &sync.RWMutex{}}
+	return &FileIO{metaLock: &sync.RWMutex{}, indexLock: &sync.RWMutex{}, recordsLock: &sync.RWMutex{}}
 }
 
 func (f *FileIO) loadTree() (*rtreego.Rtree, error) {
 	var file *os.File
 	// TODO: Separate reading and deserialization to reduce blocking
-	f.flock.RLock()
-	defer f.flock.RUnlock()
+	f.indexLock.RLock()
+	defer f.indexLock.RUnlock()
 
 	var err error
-	var reader *bufio.Reader
+	var scanner *bufio.Scanner
 	if file, err = os.OpenFile(indexFilename, os.O_RDONLY, 0660); err == nil {
-		reader = bufio.NewReader(file)
+		scanner = bufio.NewScanner(file)
 	} else {
 		return nil, err
 	}
 
 	var tree *rtreego.Rtree
-	// TODO: Handle isPrefix case. Probably with `ReadString('\n')`
-	if line, _, err := reader.ReadLine(); err == nil {
-		err = json.Unmarshal(line, &tree)
+	if scanner.Scan(); err == nil {
+		err = json.Unmarshal(scanner.Bytes(), &tree)
 	}
 
 	if err == nil {
@@ -53,13 +57,15 @@ func (f *FileIO) loadTree() (*rtreego.Rtree, error) {
 	return nil, err
 }
 
-func (f *FileIO) saveTree(tree *rtreego.Rtree) error {
+func (f *FileIO) saveTree(tree *rtreego.Rtree, indexFilename string, blocking bool) error {
 	var file *os.File
 	var err error
-	f.flock.Lock()
-	defer f.flock.Unlock()
+	if blocking {
+		f.indexLock.Lock()
+		defer f.indexLock.Unlock()
+	}
 	// TODO: Update tree, not rewrite.
-	if file, err = os.OpenFile(indexFilename, os.O_RDWR, 0660); err == nil {
+	if file, err = os.OpenFile(indexFilename, os.O_RDWR|os.O_CREATE, 0660); err == nil {
 		if js, err := json.Marshal(tree); err == nil {
 			_, err = file.WriteString(string(js) + "\n")
 		}
@@ -71,17 +77,21 @@ func (f *FileIO) saveTree(tree *rtreego.Rtree) error {
 	return err
 }
 
+func (f *FileIO) saveTreeDefault(tree *rtreego.Rtree) error {
+	return f.saveTree(tree, indexFilename, true)
+}
+
 func (f *FileIO) loadMeta(s *state) error {
 	var file *os.File
 	var err error
-	f.flock.Lock()
-	defer f.flock.Unlock()
+	f.metaLock.RLock()
+	defer f.metaLock.RUnlock()
 
-	var reader *bufio.Reader
+	var scanner *bufio.Scanner
 	if file, err = os.OpenFile(metaFilename, os.O_RDONLY, 0660); err == nil {
-		reader = bufio.NewReader(file)
-		if line, _, err := reader.ReadLine(); err == nil {
-			parts := strings.Split(string(line), " ")
+		scanner = bufio.NewScanner(file)
+		if scanner.Scan(); err == nil {
+			parts := strings.Split(scanner.Text(), " ")
 			s.fileLen, err = strconv.ParseInt(parts[0], 10, 64)
 			if err == nil {
 				s.lastID, err = strconv.ParseInt(parts[1], 10, 64)
@@ -91,25 +101,33 @@ func (f *FileIO) loadMeta(s *state) error {
 	return err
 }
 
-func (f *FileIO) saveMeta(s *state) error {
+func (f *FileIO) saveMeta(s *state, filename string, blocking bool) error {
 	var file *os.File
 	var err error
-	f.flock.Lock()
-	defer f.flock.Unlock()
-	if file, err = os.OpenFile(metaFilename, os.O_RDWR, 0660); err == nil {
+	// TODO: Come up with more elegant workaround
+	if blocking {
+		f.metaLock.Lock()
+		defer f.metaLock.Unlock()
+	}
+	if file, err = os.OpenFile(filename, os.O_RDWR|os.O_CREATE, 0660); err == nil {
 		_, err = file.WriteString(fmt.Sprintf("%d %d \n", s.fileLen, s.lastID))
 	}
 	if err == nil {
 		err = file.Sync()
 	}
+	log.Printf("Successfully saved meta with %d %d\n", s.fileLen, s.lastID)
 	return err
+}
+
+func (f *FileIO) saveMetaDefault(s *state) error {
+	return f.saveMeta(s, metaFilename, true)
 }
 
 func (f *FileIO) createRecord(point *model.Point) (int64, error) {
 	var file *os.File
 	var err error
-	f.flock.Lock()
-	defer f.flock.Unlock()
+	f.recordsLock.Lock()
+	defer f.recordsLock.Unlock()
 
 	newSize := int64(-1)
 	if file, err = os.OpenFile(recordFilename, os.O_RDWR|os.O_APPEND, 0660); err == nil {
@@ -131,8 +149,8 @@ func (f *FileIO) createRecord(point *model.Point) (int64, error) {
 func (f *FileIO) readRecords(offsets []int64) ([]*model.Point, error) {
 	var file *os.File
 	var err error
-	f.flock.Lock()
-	defer f.flock.Unlock()
+	f.recordsLock.RLock()
+	defer f.recordsLock.RUnlock()
 
 	var reader *bufio.Reader
 	if file, err = os.OpenFile(recordFilename, os.O_RDONLY, 0660); err == nil {
@@ -144,17 +162,15 @@ func (f *FileIO) readRecords(offsets []int64) ([]*model.Point, error) {
 	points := []*model.Point{}
 	bytePointer := int64(0)
 	for _, offset := range offsets {
+		log.Printf("Reading offset %d, dicarding %d...\n", offset, offset-bytePointer)
 		if _, err := reader.Discard(int(offset - bytePointer)); err == nil {
-			// TODO: Handle isPrefix case. Probably with `ReadString('\n')`
-			if line, _, err := reader.ReadLine(); err == nil {
-				var p *model.Point
-				if err = json.Unmarshal(line, &p); err == nil {
-					bytePointer = offset + int64(len(line)+1)
-					points = append(points, p)
-				}
+			p, bytesRead, err := f.readRecord(reader)
+			if err != nil {
+				break
 			}
-		}
-		if err != nil {
+			points = append(points, p)
+			bytePointer += int64(bytesRead)
+		} else {
 			break
 		}
 	}
@@ -162,4 +178,193 @@ func (f *FileIO) readRecords(offsets []int64) ([]*model.Point, error) {
 		return points, nil
 	}
 	return nil, err
+}
+
+// Reader must read from blocked file.
+func (f *FileIO) readRecord(reader *bufio.Reader) (*model.Point, int, error) {
+	var err error
+	if line, err := reader.ReadString('\n'); err == nil {
+		log.Printf("Line read: %s", line)
+		var p *model.Point
+		if err = json.Unmarshal([]byte(line), &p); err == nil {
+			// Line includes '\n'
+			return p, len(line), nil
+		}
+	}
+	return nil, 0, err
+}
+
+// Creates copy of records.db without given record, rebuilds index and metadata
+// of copy and then replaces original files with new ones new files
+func (f *FileIO) deleteRecord(offset int64, s *state) (*model.Point, error) {
+	fileSuffix := "-" + strconv.FormatInt(rand.Int63(), 16)
+	stateCopy := &state{}
+	recordCopyFilename := "records" + fileSuffix + ".db"
+	log.Printf("Copying records to %s...\n", recordCopyFilename)
+	deletedBytes, err := f.copyRecordsWithout(recordCopyFilename, offset, stateCopy)
+	if err != nil {
+		return nil, err
+	}
+	var deleted *model.Point
+	err = json.Unmarshal(deletedBytes, &deleted)
+	if err != nil {
+		return nil, err
+	}
+	log.Printf("Copied records successfully, deleted point is %+v", deleted)
+
+	indexCopyFilename := "index" + fileSuffix + ".db"
+	err = f.indexCopy(recordCopyFilename, indexCopyFilename, stateCopy)
+	if err != nil {
+		return nil, err
+	}
+
+	metaCopyFilename := "meta" + fileSuffix + ".db"
+	err = f.saveMeta(stateCopy, metaCopyFilename, false)
+	if err != nil {
+		return nil, err
+	}
+
+	f.recordsLock.Lock()
+	err = os.Rename(recordCopyFilename, recordFilename)
+	f.recordsLock.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	log.Printf("Copied %s to %s\n", recordCopyFilename, recordFilename)
+	f.indexLock.Lock()
+	err = os.Rename(indexCopyFilename, indexFilename)
+	f.indexLock.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	log.Printf("Copied %s to %s\n", indexCopyFilename, indexFilename)
+	f.metaLock.Lock()
+	// Lock state update too
+	err = os.Rename(metaCopyFilename, metaFilename)
+	f.metaLock.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	log.Printf("Copied %s to %s\n", metaCopyFilename, metaFilename)
+	f.metaLock.Lock()
+	*s = *stateCopy
+	f.metaLock.Unlock()
+	log.Printf("New state: %+v", s)
+	return deleted, err
+}
+
+func (f *FileIO) copyRecordsWithout(destFilename string, offset int64, s *state) ([]byte, error) {
+	var originFile, destFile *os.File
+	var err error
+
+	f.recordsLock.RLock()
+	defer f.recordsLock.RUnlock()
+
+	var scanner *bufio.Scanner
+	if originFile, err = os.OpenFile(recordFilename, os.O_RDONLY, 0660); err == nil {
+		scanner = bufio.NewScanner(originFile)
+	} else {
+		return nil, err
+	}
+
+	if destFile, err = os.OpenFile(destFilename, os.O_WRONLY|os.O_CREATE, 0660); err != nil {
+		return nil, err
+	}
+
+	bytePointer := int64(0)
+	var deletedRecord []byte
+	var deletedLen int
+
+	for scanner.Scan() {
+		// Ok, so ReadString() accounts for separator, Scan() doesn't.
+		data := append(scanner.Bytes(), '\n')
+		log.Printf("Reading from original records file: %s", string(data))
+		if bytePointer < offset {
+			log.Printf("Writing to records copy file: %s", string(data))
+			destFile.Write(data)
+		} else if bytePointer == offset {
+			log.Printf("Deleted data is %s", string(data))
+			deletedRecord = data[:]
+			deletedLen = len(data)
+		} else if bytePointer > offset {
+			var p *model.Point
+			if err := json.Unmarshal(data, &p); err == nil {
+				p.Location.Offset = bytePointer - int64(deletedLen)
+				if data, err = json.Marshal(p); err == nil {
+					data = append(data, '\n')
+					log.Printf("Writing to records copy file: %s", string(data))
+					destFile.Write(data)
+				}
+			}
+		}
+		bytePointer = bytePointer + int64(len(data))
+	}
+
+	err = scanner.Err()
+	if err != nil {
+		return nil, err
+	}
+
+	stat, err := destFile.Stat()
+	if err != nil {
+		return nil, err
+	}
+
+	s.fileLen = stat.Size()
+	return deletedRecord, nil
+}
+
+// Returns last ID to for metadata.
+func (f *FileIO) indexCopy(recordFilename, indexFilename string, s *state) error {
+	err := f.buildIndexCopy(recordFilename, s)
+	if err != nil {
+		return err
+	}
+	log.Println("Successfully built index copy")
+
+	err = f.saveTree(s.tree, indexFilename, false)
+	if err != nil {
+		return err
+	}
+	log.Printf("Successfully saved index copy at %s\n", indexFilename)
+	return nil
+}
+
+func (f *FileIO) buildIndexCopy(filename string, s *state) error {
+	var file *os.File
+	var err error
+	f.recordsLock.RLock()
+	defer f.recordsLock.RUnlock()
+
+	var reader *bufio.Reader
+	if file, err = os.OpenFile(filename, os.O_RDONLY, 0660); err == nil {
+		reader = bufio.NewReader(file)
+	} else {
+		return err
+	}
+
+	// TODO: Create new instance at the single point.
+	tree := rtreego.NewTree(2, 3, 3)
+	bytePointer := int64(0)
+	lastID := int64(-1)
+	for {
+		p, bytesRead, err := f.readRecord(reader)
+		if (err != nil && err != io.EOF) || p == nil {
+			break
+		}
+
+		p.Location.Offset = bytePointer
+		tree.Insert(p.Location)
+		if lastID < p.ID {
+			lastID = p.ID
+		}
+
+		bytePointer += int64(bytesRead)
+	}
+	if err == nil || err == io.EOF {
+		s.tree = tree
+		s.lastID = lastID
+		return nil
+	}
+	return err
 }
