@@ -6,6 +6,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"sort"
 	"sync"
 
 	"github.com/dhconnelly/rtreego"
@@ -25,35 +26,70 @@ const recordFilename = "records.db"
 type FileIO struct {
 	fileMx       *sync.RWMutex
 	priorWriteMx *sync.Mutex
+	state        *state
 }
 
 func newReader() *FileIO {
-	return &FileIO{fileMx: &sync.RWMutex{}, priorWriteMx: &sync.Mutex{}}
+	return &FileIO{fileMx: &sync.RWMutex{}, priorWriteMx: &sync.Mutex{}, state: &state{}}
 }
 
-func (f *FileIO) loadTree() (*rtreego.Rtree, error) {
-	var file *os.File
-	// TODO: Separate reading and deserialization to reduce blocking
+func (f *FileIO) loadState() error {
 	f.fileMx.RLock()
 	defer f.fileMx.RUnlock()
+
+	err := f.loadTree()
+	if err != nil {
+		return err
+	}
+	log.Println("Successfully loaded index tree")
+	err = f.loadMeta()
+	if err == nil {
+		log.Println("Successfully loaded metadata")
+	}
+	return err
+}
+
+func (f *FileIO) saveState() error {
+	f.fileMx.RLock()
+	defer f.fileMx.RUnlock()
+
+	err := f.saveTree(f.state.tree, indexFilename, false)
+	if err != nil {
+		return err
+	}
+	log.Println("Successfully saved index tree")
+	err = f.saveMeta(f.state, metaFilename, false)
+	if err == nil {
+		log.Println("Successfully saved metadata")
+	}
+	return err
+}
+
+func (f *FileIO) loadTree() error {
+	var file *os.File
 
 	var err error
 	var scanner *bufio.Scanner
 	if file, err = os.OpenFile(indexFilename, os.O_RDONLY, 0660); err == nil {
 		scanner = bufio.NewScanner(file)
 	} else {
-		return nil, err
+		return err
 	}
 
 	var tree *rtreego.Rtree
 	if scanner.Scan(); err == nil {
 		err = json.Unmarshal(scanner.Bytes(), &tree)
 	}
-
-	if err == nil {
-		return tree, nil
+	if err != nil {
+		return err
 	}
-	return nil, err
+	if tree == nil {
+		tree = rtreego.NewTree(2, 3, 3)
+		err = nil
+	}
+	f.state.tree = tree
+
+	return err
 }
 
 func (f *FileIO) saveTree(tree *rtreego.Rtree, indexFilename string, blocking bool) error {
@@ -78,24 +114,18 @@ func (f *FileIO) saveTree(tree *rtreego.Rtree, indexFilename string, blocking bo
 	return err
 }
 
-func (f *FileIO) saveTreeDefault(tree *rtreego.Rtree) error {
-	return f.saveTree(tree, indexFilename, true)
-}
-
-func (f *FileIO) loadMeta(s *state) error {
+func (f *FileIO) loadMeta() error {
 	var file *os.File
 	var err error
-	f.fileMx.RLock()
-	defer f.fileMx.RUnlock()
 
 	var scanner *bufio.Scanner
 	if file, err = os.OpenFile(metaFilename, os.O_RDONLY, 0660); err == nil {
 		scanner = bufio.NewScanner(file)
 		if scanner.Scan(); err == nil {
 			parts := strings.Split(scanner.Text(), " ")
-			s.fileLen, err = strconv.ParseInt(parts[0], 10, 64)
+			f.state.fileLen, err = strconv.ParseInt(parts[0], 10, 64)
 			if err == nil {
-				s.lastID, err = strconv.ParseInt(parts[1], 10, 64)
+				f.state.lastID, err = strconv.ParseInt(parts[1], 10, 64)
 			}
 		}
 	}
@@ -120,10 +150,6 @@ func (f *FileIO) saveMeta(s *state, filename string, blocking bool) error {
 	}
 	log.Printf("Successfully saved meta with %d %d\n", s.fileLen, s.lastID)
 	return err
-}
-
-func (f *FileIO) saveMetaDefault(s *state) error {
-	return f.saveMeta(s, metaFilename, true)
 }
 
 func (f *FileIO) createRecord(point *model.Point, recordFilename string, blocking bool) (int64, error) {
@@ -154,15 +180,29 @@ func (f *FileIO) createRecord(point *model.Point, recordFilename string, blockin
 	return newSize, err
 }
 
-func (f *FileIO) createRecordDefault(point *model.Point) (int64, error) {
-	return f.createRecord(point, recordFilename, true)
-}
-
-func (f *FileIO) readRecords(offsets []int64) ([]*model.Point, error) {
-	var file *os.File
-	var err error
+func (f *FileIO) createRecordClient(p *model.Point) (int64, error) {
+	// Lock access here to ensure consistency of state data
 	f.fileMx.RLock()
 	defer f.fileMx.RUnlock()
+	p.ID = f.state.lastID + 1
+	p.Location.Offset = f.state.fileLen
+	newSize, err := f.createRecord(p, recordFilename, false)
+	if err != nil {
+		return -1, err
+	}
+	f.state.fileLen = newSize
+	f.state.lastID++
+	f.state.tree.Insert(p.Location)
+	return newSize, err
+}
+
+func (f *FileIO) readRecords(offsets []int64, blocking bool) ([]*model.Point, error) {
+	var file *os.File
+	var err error
+	if blocking {
+		f.fileMx.RLock()
+		defer f.fileMx.RUnlock()
+	}
 
 	var reader *bufio.Reader
 	if file, err = os.OpenFile(recordFilename, os.O_RDONLY, 0660); err == nil {
@@ -207,7 +247,7 @@ func (f *FileIO) readRecord(reader *bufio.Reader) (*model.Point, int, error) {
 }
 
 // TODO: Refactor to unify with deleteRecord()
-func (f *FileIO) updateRecord(offset int64, args map[string]string, s *state) (*model.Point, error) {
+func (f *FileIO) updateRecord(offset int64, args map[string]string) (*model.Point, error) {
 	fileSuffix := "-" + strconv.FormatInt(rand.Int63(), 16)
 	stateCopy := &state{}
 	recordCopyFilename := "records" + fileSuffix + ".db"
@@ -228,7 +268,7 @@ func (f *FileIO) updateRecord(offset int64, args map[string]string, s *state) (*
 	if err != nil {
 		return nil, err
 	}
-	log.Printf("Copied records successfully, point to update: %+v", updated)
+	log.Printf("Copied records successfully, point to update: %+v\n", updated)
 
 	for key, value := range args {
 		switch strings.ToLower(key) {
@@ -291,14 +331,14 @@ func (f *FileIO) updateRecord(offset int64, args map[string]string, s *state) (*
 		return nil, err
 	}
 	log.Printf("Copied %s to %s\n", metaCopyFilename, metaFilename)
-	*s = *stateCopy
-	log.Printf("New state: %+v", s)
+	*f.state = *stateCopy
+	log.Printf("New state: %+v\n", f.state)
 	return updated, nil
 }
 
 // Creates copy of records.db without given record, rebuilds index and metadata
 // of copy and then replaces original files with new ones new files
-func (f *FileIO) deleteRecord(offset int64, s *state) (*model.Point, error) {
+func (f *FileIO) deleteRecord(offset int64) (*model.Point, error) {
 	fileSuffix := "-" + strconv.FormatInt(rand.Int63(), 16)
 	stateCopy := &state{}
 	recordCopyFilename := "records" + fileSuffix + ".db"
@@ -355,8 +395,8 @@ func (f *FileIO) deleteRecord(offset int64, s *state) (*model.Point, error) {
 		return nil, err
 	}
 	log.Printf("Copied %s to %s\n", metaCopyFilename, metaFilename)
-	*s = *stateCopy
-	log.Printf("New state: %+v", s)
+	*f.state = *stateCopy
+	log.Printf("New state: %+v\n", f.state)
 	return deleted, err
 }
 
@@ -469,4 +509,19 @@ func (f *FileIO) buildIndexCopy(filename string, s *state) error {
 		return nil
 	}
 	return err
+}
+
+func (f *FileIO) searchIntersect(rect *rtreego.Rect) ([]*model.Point, error) {
+	f.fileMx.RLock()
+	defer f.fileMx.RUnlock()
+
+	data := f.state.tree.SearchIntersect(rect)
+	offsets := []int64{}
+	for _, spatial := range data {
+		if spoint, ok := spatial.(*rtreego.SPoint); ok {
+			offsets = append(offsets, spoint.Offset)
+		}
+	}
+	sort.Sort(model.Int64Slice(offsets))
+	return f.readRecords(offsets, false)
 }

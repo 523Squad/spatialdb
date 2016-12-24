@@ -1,7 +1,6 @@
 package client
 
 import (
-	"sort"
 	"strings"
 	"unicode/utf8"
 
@@ -9,7 +8,6 @@ import (
 	"github.com/reiver/go-oi"
 	"github.com/reiver/go-telnet"
 
-	"encoding/json"
 	"fmt"
 	"spatialdb/model"
 	"strconv"
@@ -27,9 +25,9 @@ type ConnectionHandler struct {
 
 type connection struct {
 	// TODO: Synchronize access to this please.
-	state *state
 }
 
+// NewHandler creates new connection handler for telnet clients.
 func NewHandler() *ConnectionHandler {
 	return &ConnectionHandler{fileIO: newReader()}
 }
@@ -41,7 +39,7 @@ func (h *ConnectionHandler) ServeTELNET(ctx telnet.Context, w telnet.Writer, r t
 	var buffer [1]byte
 	p := buffer[:]
 
-	conn := &connection{state: &state{tree: rtreego.NewTree(2, 3, 3)}}
+	conn := &connection{}
 	oi.LongWriteString(w, h.processCommand(conn, "load")+"\n")
 	// Append buffer to a command until ';' met.
 	command := []rune{}
@@ -78,7 +76,7 @@ func (h *ConnectionHandler) processCommand(c *connection, command string) string
 	var res string
 	switch parts[0] {
 	case "add":
-		p := &model.Point{ID: c.state.lastID + 1, Name: parts[1]}
+		p := &model.Point{Name: parts[1]}
 		lat, err := strconv.ParseFloat(parts[2], 64)
 		if err != nil {
 			break
@@ -87,15 +85,12 @@ func (h *ConnectionHandler) processCommand(c *connection, command string) string
 		if err != nil {
 			break
 		}
-		p.Location = &rtreego.SPoint{Latitude: lat, Longitude: lng, Offset: c.state.fileLen}
-		newSize, err := h.fileIO.createRecordDefault(p)
+		p.Location = &rtreego.SPoint{Latitude: lat, Longitude: lng}
+		newSize, err := h.fileIO.createRecordClient(p)
 		if err != nil {
 			break
 		}
-		c.state.lastID = c.state.lastID + 1
-		c.state.fileLen = newSize
-		c.state.tree.Insert(p.Location)
-		res = fmt.Sprintf("Inserted %+v, new file size: %v", p.Location, c.state.fileLen)
+		res = fmt.Sprintf("Inserted %+v, new file size: %v", p.Location, newSize)
 	case "intersect":
 		lat, err := strconv.ParseFloat(parts[1], 64)
 		if err != nil {
@@ -117,20 +112,10 @@ func (h *ConnectionHandler) processCommand(c *connection, command string) string
 		if err != nil {
 			break
 		}
-		res = fmt.Sprintf("%+v", rect)
-		data := c.state.tree.SearchIntersect(rect)
-		res = fmt.Sprintf("Found data: %+v\n", data)
-		offsets := []int64{}
-		for _, spatial := range data {
-			if spoint, ok := spatial.(*rtreego.SPoint); ok {
-				offsets = append(offsets, spoint.Offset)
-			}
-		}
-		sort.Sort(model.Int64Slice(offsets))
-		if records, err := h.fileIO.readRecords(offsets); err == nil {
-			res = res + fmt.Sprintf("Found records %d:\n", len(records))
+		if records, err := h.fileIO.searchIntersect(rect); err == nil {
+			res = res + fmt.Sprintf("Found records %d:", len(records))
 			for _, r := range records {
-				res = res + fmt.Sprintf("\t%+v\n", *r)
+				res = res + fmt.Sprintf("\n\t%+v", *r)
 			}
 		}
 	case "update":
@@ -146,7 +131,7 @@ func (h *ConnectionHandler) processCommand(c *connection, command string) string
 			args[parts[i]] = parts[i+1]
 		}
 
-		p, err := h.fileIO.updateRecord(offset, args, c.state)
+		p, err := h.fileIO.updateRecord(offset, args)
 		if err == nil {
 			res = fmt.Sprintf("Successfully updated %+v at offset %d", p, offset)
 		}
@@ -155,38 +140,19 @@ func (h *ConnectionHandler) processCommand(c *connection, command string) string
 		if err != nil {
 			break
 		}
-		p, err := h.fileIO.deleteRecord(offset, c.state)
+		p, err := h.fileIO.deleteRecord(offset)
 		if err == nil {
 			res = fmt.Sprintf("Successfully deleted %+v at offset %d", p, offset)
 		}
-	case "print":
-		js, err := json.Marshal(c.state.tree)
-		if err == nil {
-			res = string(js)
-		}
 	case "save":
-		err = h.fileIO.saveTreeDefault(c.state.tree)
-		if err != nil {
-			break
-		}
-		res = "Successfully saved index tree\n"
-		err = h.fileIO.saveMetaDefault(c.state)
+		err = h.fileIO.saveState()
 		if err == nil {
-			res = res + "Successfully saved metadata"
+			res = "Successfully saved state"
 		}
 	case "load":
-		c.state.tree, err = h.fileIO.loadTree()
-		if c.state.tree == nil {
-			c.state.tree = rtreego.NewTree(2, 3, 3)
-			err = nil
-		}
-		if err != nil {
-			break
-		}
-		res = "Successfully loaded index tree\n"
-		err = h.fileIO.loadMeta(c.state)
+		err = h.fileIO.loadState()
 		if err == nil {
-			res = res + "Successfully loaded metadata"
+			res = "Successfully loaded state"
 		}
 	case "hang":
 		for i := 0; i < 5; i++ {
