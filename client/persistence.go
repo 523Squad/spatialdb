@@ -103,12 +103,12 @@ func (f *FileIO) loadTree() error {
 	if scanner.Scan(); err == nil {
 		err = json.Unmarshal(scanner.Bytes(), &tree)
 	}
-	if err != nil {
-		return err
-	}
 	if tree == nil {
 		tree = rtreego.NewTree(2, 3, 3)
 		err = nil
+	}
+	if err != nil {
+		return err
 	}
 	f.state.tree = tree
 
